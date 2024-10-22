@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-import os, re, stat, sys
+import os, re, stat, sys, subprocess
 from io import open
 
 
@@ -60,12 +60,21 @@ def list_links_list():
 
 
 def list_git():
-    git_files = os.popen("git ls-files")
-    for line in git_files:
-        yield line.rstrip("\n")
+    try:
+        subprocess.check_output(['git', 'rev-parse', '--is-inside-work-tree'], stderr=subprocess.STDOUT)
+        with os.popen("git ls-files") as git_files:
+            for line in git_files:
+                yield line.rstrip("\n")
+    except subprocess.CalledProcessError:
+        return None
 
-    if git_files.close():
-        sys.stderr.write("W: git file listing failed, skipping some validation\n")
+
+def list_dir():
+    pwd = os.getcwd()
+    # Parse every directory to create set of files to be matched with WHENCE entries
+    for root, dirs, files in os.walk(pwd):
+        for file in files:
+            yield os.path.relpath(os.path.join(root, file.rstrip("\n")), pwd)
 
 
 def main():
@@ -97,7 +106,10 @@ def main():
         ]
     )
     known_prefixes = set(name for name in whence_list if name.endswith("/"))
-    git_files = set(list_git())
+    files_set = set(list_git())
+    # If it is not git repo call list_dir()
+    if not files_set:
+        files_set = set(list_dir())
     executable_files = set(
         [
             "build_packages.py",
@@ -138,12 +150,12 @@ def main():
             )
             ret = 1
 
-    for name in sorted(list(known_files - git_files) if len(git_files) else list()):
+    for name in sorted(list(known_files - files_set) if len(files_set) else list()):
         sys.stderr.write("E: %s listed in WHENCE does not exist\n" % name)
         ret = 1
 
     # A link can point to a file...
-    valid_targets = set(git_files)
+    valid_targets = set(files_set)
 
     # ... or to a directory
     for target in set(valid_targets):
@@ -154,14 +166,14 @@ def main():
                 break
             valid_targets.add(dirname)
 
-    for link, target in sorted(links_list if len(git_files) else list()):
+    for link, target in sorted(links_list if len(files_set) else list()):
         if target not in valid_targets:
             sys.stderr.write(
                 "E: target %s of link %s in WHENCE does not exist\n" % (target, link)
             )
             ret = 1
 
-    for name in sorted(list(git_files - known_files)):
+    for name in sorted(list(files_set - known_files)):
         # Ignore subdirectory changelogs and GPG detached signatures
         if name.endswith("/ChangeLog") or (
             name.endswith(".asc") and name[:-4] in known_files
@@ -182,7 +194,7 @@ def main():
             sys.stderr.write("E: %s is missing execute bit\n" % name)
             ret = 1
 
-    for name in sorted(list(git_files - executable_files)):
+    for name in sorted(list(files_set - executable_files)):
         mode = os.stat(name).st_mode
         if stat.S_ISDIR(mode):
             if not (
